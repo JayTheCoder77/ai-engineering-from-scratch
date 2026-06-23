@@ -70,6 +70,84 @@ class SimpleEmbedder:
         return [self.embed(text) for text in texts]
 
 
+class HFTransformerEmbedder:
+    """
+    Extracts embeddings using standard transformers and PyTorch models.
+    Adheres to requirements.txt and standard library-first policies.
+    """
+    def __init__(self, model_name="BAAI/bge-small-en-v1.5"):
+        import torch
+        from transformers import AutoTokenizer, AutoModel
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name).to(self.device)
+
+    def fit(self, documents):
+        # Pre-trained models do not require fitting
+        pass
+
+    def embed(self, text):
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts):
+        import torch
+        encoded_input = self.tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors='pt').to(self.device)
+        with torch.no_grad():
+            model_output = self.model(**encoded_input)
+        
+        # Mean Pooling
+        token_embeddings = model_output[0]
+        attention_mask = encoded_input['attention_mask']
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        sentence_embeddings = sum_embeddings / sum_mask
+        
+        # Normalize
+        normalized = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
+        return [vec.cpu().numpy() for vec in normalized]
+
+
+class SentenceTransformersEmbedder:
+    """
+    Extracts embeddings using the sentence-transformers library.
+    Requires pip install sentence-transformers.
+    """
+    def __init__(self, model_name="BAAI/bge-small-en-v1.5"):
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers package is not installed. "
+                "Please run `pip install sentence-transformers` to use this class, "
+                "or use HFTransformerEmbedder which runs out-of-the-box using the repository dependencies."
+            )
+        self.model = SentenceTransformer(model_name)
+
+    def fit(self, documents):
+        pass
+
+    def embed(self, text):
+        import numpy as np
+        vec = self.model.encode(text, convert_to_numpy=True)
+        # Normalize to unit length
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        return vec
+
+    def embed_batch(self, texts):
+        import numpy as np
+        vecs = self.model.encode(texts, convert_to_numpy=True)
+        res = []
+        for vec in vecs:
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            res.append(vec)
+        return res
+
+
 def cosine_similarity(a, b):
     dot = np.dot(a, b)
     norm_a = np.linalg.norm(a)
@@ -136,8 +214,8 @@ class VectorIndex:
 
 
 class SemanticSearchEngine:
-    def __init__(self, chunk_size=200, overlap=50):
-        self.embedder = SimpleEmbedder()
+    def __init__(self, chunk_size=200, overlap=50, embedder=None):
+        self.embedder = embedder if embedder is not None else SimpleEmbedder()
         self.index = VectorIndex()
         self.chunk_size = chunk_size
         self.overlap = overlap
@@ -242,7 +320,7 @@ SAMPLE_DOCUMENTS = [
     of the incident. Status page updates are posted at status.acme.com
     within 5 minutes of any detected incident. Post-incident reports are
     published within 48 hours for any outage exceeding 15 minutes."""
-]
+]   
 
 
 if __name__ == "__main__":

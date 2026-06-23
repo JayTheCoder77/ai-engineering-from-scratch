@@ -474,6 +474,30 @@ TEST_SUITE = [
             "forbidden_phrases": ["here is the complete solution"],
         },
     },
+    {
+        "name": "Meta-Prompt : Improve Prompt",
+        "pattern": "meta_prompt",
+        "variables": {
+            "objective": "Write a haiku",
+            "metric": "5-7-5 syllables and poetic quality",
+            "model": "gemini-2.5-flash"
+        },
+        "criteria": {
+            "required_keywords": ["rain"],
+            "max_words" : 20
+        },
+    },
+    {
+        "name": "Decomposition Pattern",
+        "pattern": "decomposition",
+        "variables": {
+            "problem": "make a food delivery app with ordering system, cart, and delivery tracking features.",
+        },
+        "criteria": {
+            "required_keywords": ["food"],
+        },
+    },
+
 ]
 
 

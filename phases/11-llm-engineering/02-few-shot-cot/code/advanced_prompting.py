@@ -507,8 +507,11 @@ TEST_QUESTIONS = [
 
 
 if __name__ == "__main__":
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "your-api-key"))
-    model = "gpt-4o"
+    client = OpenAI(
+        base_url="http://localhost:1234/v1",                                                                                                                                    
+        api_key="lm-studio"  # LM Studio does not require a real key, but a string must be passed
+    )
+    model = "google/gemma-4-e4b"
 
     print("=" * 60)
     print("ADVANCED PROMPTING PIPELINE")

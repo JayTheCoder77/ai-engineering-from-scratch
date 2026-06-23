@@ -1,7 +1,24 @@
 import json
+import math
 import numpy as np
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 
+def text_cosine_similarity(a , b):
+    a , b = a.lower().split(), b.lower().split()
+    cnt_a = Counter(a)
+    cnt_b = Counter(b)
+
+    vocab = set(cnt_a.keys())| set(cnt_b.keys())
+
+    vec_a = np.array([cnt_a[w] for w in vocab])
+    vec_b = np.array([cnt_b[w] for w in vocab])
+    
+    dot = np.dot(vec_a, vec_b)
+    norm_a = np.linalg.norm(vec_a)
+    norm_b = np.linalg.norm(vec_b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
 
 def count_tokens(text):
     if not text:
@@ -12,7 +29,9 @@ def count_tokens(text):
 def count_tokens_json(obj):
     return count_tokens(json.dumps(obj))
 
-
+# Add a "token waste detector" to the ContextBudget class. It should flag components using 
+# more than 30% of the budget and suggest compression strategies specific to each component type 
+# (summarize history, prune tools, re-rank documents).
 class ContextBudget:
     def __init__(self, max_tokens=128000, generation_reserve=4000):
         self.max_tokens = max_tokens
@@ -40,6 +59,25 @@ class ContextBudget:
 
         self.allocations[component] = tokens
         return content, tokens
+
+    def token_waste_detector():
+        total_tokens = sum(self.allocations.values())
+        threshold = self.max_tokens * 0.3
+
+        if total_tokens > threshold:
+            print(f"Token waste detected: {total_tokens} tokens used (>30% threshold).")
+
+            # Suggest compression strategies based on component type
+            for component, tokens in self.allocations.items():
+                if tokens > threshold:
+                    print(f"\n  {component}:")
+
+                    if "history" in component.lower():
+                        print("    - Suggestion: Summarize conversation history")
+                    elif "tools" in component.lower():
+                        print("    - Suggestion: Prune unused tools")
+                    elif "documents" in component.lower():
+                        print("    - Suggestion: Re-rank documents by relevance")
 
     def remaining(self):
         used = sum(self.allocations.values())
@@ -90,7 +128,6 @@ def score_relevance(query, documents):
         overlap = len(query_words & doc_words) / len(query_words)
         scores.append(round(overlap, 3))
     return scores
-
 
 class ConversationManager:
     def __init__(self, max_history_tokens=5000):
@@ -259,6 +296,8 @@ class ContextEngine:
             "The codebase follows the repository pattern for data access.",
             "Error logging uses structured JSON format with correlation IDs.",
             "The vector search index uses HNSW with 128 dimensions and cosine distance.",
+            "The project uses PostgreSQL 16 with pgvector for embedding data storage.",
+            "The frontend is built with Next.js 15 using the App Router framework.",
         ]
 
     def assemble(self, query):
@@ -270,16 +309,37 @@ class ContextEngine:
         tool_text = json.dumps(list(tools.keys()))
         budget.allocate("tools", tool_text, max_tokens=2000)
 
+        # excercise 
+
         relevance = score_relevance(query, self.knowledge_base)
         threshold = 0.05
-        relevant_docs = [
-            doc for doc, score in zip(self.knowledge_base, relevance)
-            if score >= threshold
-        ]
+        
+        # Filter and sort by score descending first
+        paired = sorted(zip(relevance, self.knowledge_base), reverse=True)
+        filtered_pairs = [(score, doc) for score, doc in paired if score >= threshold]
 
-        if relevant_docs:
-            doc_scores = [s for s in relevance if s >= threshold]
-            reordered = reorder_lost_in_middle(relevant_docs, doc_scores)
+        if filtered_pairs:
+            # Semantic deduplication
+            kept_docs = []
+            kept_scores = []
+            for score, doc in filtered_pairs:
+                is_duplicate = False
+                for kept_doc in kept_docs:
+                    if text_cosine_similarity(doc, kept_doc) > 0.8:
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    kept_docs.append(doc)
+                    kept_scores.append(score)
+            
+            # Measure budget recovered
+            original_text = "\n".join([doc for _, doc in filtered_pairs])
+            dedup_text = "\n".join(kept_docs)
+            recovered_tokens = count_tokens(original_text) - count_tokens(dedup_text)
+            if recovered_tokens > 0:
+                print(f"  [Deduplicator] Recovered {recovered_tokens} tokens by removing duplicates!")
+
+            reordered = reorder_lost_in_middle(kept_docs, kept_scores)
             doc_text = "\n".join(reordered)
             budget.allocate("retrieved_context", doc_text, max_tokens=3000)
 
