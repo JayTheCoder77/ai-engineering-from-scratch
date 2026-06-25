@@ -5,7 +5,7 @@ import hashlib
 import statistics
 from dataclasses import dataclass, field, asdict
 from typing import Optional
-
+import random
 
 @dataclass
 class TestCase:
@@ -47,6 +47,89 @@ class EvalResult:
         return sum(s.score for s in self.scores) / len(self.scores)
 
 
+# --------------- ex - 1 ------------------
+
+common_words = [
+    "the", "is", "a", "an", "of", "to", "in", "on", "at", "for",
+    "with", "by", "from", "and", "or", "but", "not", "as", "if", "then",
+    "this", "that", "these", "those", "it", "its", "he", "she", "they", "we",
+    "you", "I", "me", "my", "your", "our", "their", "be", "are", "was",
+    "were", "have", "has", "had", "do", "does", "did", "can", "could", "will",
+    "would", "should", "may", "might", "what", "when", "where", "why", "how", "which",
+    "who", "there", "here", "all", "some", "many", "few", "more", "most", "other",
+    "time", "year", "day", "people", "person", "country", "city", "capital", "world", "earth",
+    "france", "paris", "india", "delhi", "london", "computer", "python", "code", "program", "data",
+    "machine", "learning", "model", "algorithm", "network", "science", "number", "text", "language", "answer"
+]
+
+word_embeddings = {}
+
+cost_tracker = {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_cost": 0.0
+}
+
+def embed() :
+    rng = random.Random(42)
+    for word in common_words:
+        embedding = [rng.uniform(-1, 1) for _ in range(50)]
+        word_embeddings[word] = embedding
+embed()
+
+def get_word_vector(word):
+    word = word.lower().strip()
+    if word in word_embeddings:
+        return word_embeddings[word]
+    word_seed = int(hashlib.md5(word.encode()).hexdigest(), 16) % (2**31)
+    local_rng = random.Random(word_seed)
+    return [local_rng.uniform(-1, 1) for _ in range(50)] 
+
+def cosine_similarity(a , b):
+    dot_product = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot_product / (norm_a * norm_b)
+
+def similarity_helper(reference , hypothesis):
+    # greedy matching
+    ref_tokens = reference.lower().split()
+    hyp_tokens = hypothesis.lower().split()
+    ref_vectors = [get_word_vector(t) for t in ref_tokens]
+    hyp_vectors = [get_word_vector(t) for t in hyp_tokens]
+
+    cosine = [[cosine_similarity(ref_vec , hyp_vec) for hyp_vec in hyp_vectors] for ref_vec in ref_vectors]
+    return cosine
+
+def bert_score(ref , hyp):
+    precision = 0.0
+    recall = 0.0
+    f1 = 0.0
+    ref_tokens = ref.lower().split()
+    hyp_tokens = hyp.lower().split()
+    if len(ref_tokens) == 0 or len(hyp_tokens) == 0:
+        return precision , recall , f1
+    
+    # compute cosine similarity matrix between reference and hypothesis
+    cosine = similarity_helper(ref , hyp)
+    
+    # compute precision
+    precision = sum(max(col) for col in zip(*cosine)) / len(hyp_tokens)
+    recall = sum(max(row) for row in cosine) / len(ref_tokens)
+    
+    # compute f1 score
+    if precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+    
+    return precision , recall , f1
+    
+    
+# --------------- ex - 1 ------------------
+
 RUBRICS = {
     "relevance": {
         5: "Directly and specifically answers the question with no irrelevant content",
@@ -85,17 +168,119 @@ def score_with_llm_judge(input_text, model_output, reference_output=None, criter
 
     scores = []
     for criterion in criteria:
-        score_value = simulate_judge_score(input_text, model_output, reference_output, criterion)
-        reasoning = generate_judge_reasoning(input_text, model_output, criterion, score_value)
+        score_value = simulate_judge_score(input_text, model_output,reference_output, criterion)
+        reasoning = generate_judge_reasoning(input_text,model_output, criterion, score_value)
         scores.append(EvalScore(
             criterion=criterion,
             score=score_value,
             reasoning=reasoning,
         ))
+            
+        # Track the cost of this judge call
+        track_judge_call(input_text, model_output, reference_output,reasoning)
+            
     return scores
 
+def print_cost_report():
+    run_cost = cost_tracker["total_cost"]
+    # 10 runs per week * 4.33 weeks per month
+    projected_monthly_cost = run_cost * 10 * 4.33
+    
+    print("=" * 50)
+    print("  EVAL RUN COST REPORT")
+    print("=" * 50)
+    print(f"  Total Input Tokens:  {cost_tracker['input_tokens']:,}")
+    print(f"  Total Output Tokens: {cost_tracker['output_tokens']:,}")
+    print(f"  Total Run Cost:      ${run_cost:.6f}")
+    print(f"  Projected Monthly Cost (10 runs/wk): ${projected_monthly_cost:.2f}")
+    print("=" * 50)
 
-def simulate_judge_score(input_text, model_output, reference_output, criterion):
+# ex5
+
+
+# ex-4
+def cohen_kappa(scores_r1, scores_r2):
+    if len(scores_r1) != len(scores_r2) or len(scores_r1) == 0:
+        return 0.0
+
+    n = len(scores_r1)
+        
+    # 1. Observed Agreement (po)
+    matches = sum(1 for s1, s2 in zip(scores_r1, scores_r2) if s1 == s2)
+    po = matches / n
+
+    # 2. Expected Agreement (pe)
+    all_categories = set(scores_r1 + scores_r2)
+    pe = 0.0
+    for category in all_categories:
+        prob_r1 = scores_r1.count(category) / n
+        prob_r2 = scores_r2.count(category) / n
+        pe += prob_r1 * prob_r2
+
+    # 3. Final Kappa
+    if pe >= 1.0:
+        return 1.0
+    return round((po - pe) / (1 - pe), 4)
+
+def calculate_judge_agreement(test_suite , model_name , criterion="correctness"):
+    scores_r1 = []
+    scores_r2 = []
+    scores_r3 = []
+
+    for item in test_suite:
+        output = run_model(model_name , item.input_text)
+
+        scores_r1.append(simulate_judge_score(item.input_text , output , item.reference_output ,criterion ,  0))
+        scores_r2.append(simulate_judge_score(item.input_text , output , item.reference_output ,criterion ,  30))
+        scores_r3.append(simulate_judge_score(item.input_text , output , item.reference_output ,criterion ,  60))
+    
+    kappa_12 = cohen_kappa(scores_r1 , scores_r2)
+    kappa_13 = cohen_kappa(scores_r1 , scores_r3)
+    kappa_23 = cohen_kappa(scores_r2 , scores_r3)
+
+    avg_kappa = (kappa_12 + kappa_13 + kappa_23) / 3.0
+        
+    # Let's print out the report
+    print("=" * 50)
+    print(f"  INTER-RATER RELIABILITY: {criterion.upper()}")
+    print("=" * 50)
+    print(f"  Rater 1 vs Rater 2 Kappa: {kappa_12:.4f}")
+    print(f"  Rater 1 vs Rater 3 Kappa: {kappa_13:.4f}")
+    print(f"  Rater 2 vs Rater 3 Kappa: {kappa_23:.4f}")
+    print(f"  Average Cohen's Kappa:    {avg_kappa:.4f}")
+    print("=" * 50)
+
+    return avg_kappa
+
+# ex5
+
+def track_judge_call(input_text , model_output , reference_output , reasoning):
+    def count_tokens(text):
+        if not text:
+            return 0
+        # Estimate 1 word ≈ 1.3 tokens
+        return int(len(text.split()) * 1.3)
+    
+    # Estimate input tokens: Base rubric (500) + input + model
+    # output + reference
+    input_tokens = 500 + count_tokens(input_text) + count_tokens(model_output) + count_tokens(reference_output)
+    
+    # Estimate output tokens: reasoning length (minimum 100)
+    output_tokens = max(100, count_tokens(reasoning))
+    
+    # Pricing for GPT-4o-mini: $0.15/1M input, $0.60/1M output
+    input_cost = input_tokens * (0.15 / 1_000_000)
+    output_cost = output_tokens * (0.60 / 1_000_000)
+    cost = input_cost + output_cost
+    
+    # Accumulate
+    cost_tracker["input_tokens"] += input_tokens
+    cost_tracker["output_tokens"] += output_tokens
+    cost_tracker["total_cost"] += cost
+
+
+# ex5
+def simulate_judge_score(input_text, model_output, reference_output, criterion , rater_seed=0):
     output_len = len(model_output)
     input_len = len(input_text)
 
@@ -128,7 +313,7 @@ def simulate_judge_score(input_text, model_output, reference_output, criterion):
         if keyword_overlap > 0.3:
             base_score = min(5, base_score + 1)
 
-    seed = hash(f"{input_text}{model_output}{criterion}") % 100
+    seed = (hash(f"{input_text}{model_output}{criterion}") + rater_seed) % 100
     if seed < 15:
         base_score = max(1, base_score - 1)
     elif seed > 85:
@@ -136,7 +321,108 @@ def simulate_judge_score(input_text, model_output, reference_output, criterion):
 
     return max(1, min(5, base_score))
 
+# ============== ex-2 =============
 
+def simulate_pairwise_judge(input_text , output_a , output_b , reference_output=None):
+    output_a_tokens = output_a.lower().split()
+    output_b_tokens = output_b.lower().split()
+    
+    # safety
+    unsafe_patterns = ["hack", "exploit", "steal", "weapon", "illegal"]
+    a_unsafe = any(p in output_a.lower() for p in unsafe_patterns)
+    b_unsafe = any(p in output_b.lower() for p in unsafe_patterns)
+    
+    if a_unsafe and not b_unsafe:
+        return "B Wins" , "Response A contains unsafe patterns"
+    if b_unsafe and not a_unsafe:
+        return "A Wins" , "Response B contains unsafe patterns"
+    
+    # reference based
+    if reference_output:
+        p_a, r_a, f1_a = bert_score(reference_output, output_a)
+        p_b, r_b, f1_b = bert_score(reference_output, output_b)
+
+        if f1_a > f1_b + 0.05:
+            return "A Wins", f"F1 higher for A (F1={f1_a:.3f} vs {f1_b:.3f})"
+        if f1_b > f1_a + 0.05:
+            return "B Wins", f"F1 higher for B (F1={f1_b:.3f} vs {f1_a:.3f})"
+    
+    # relevance (Fallback)
+    input_words = set(input_text.lower().split())
+    a_relevance = len(input_words & set(output_a_tokens)) / max(len(input_words), 1)
+    b_relevance = len(input_words & set(output_b_tokens)) / max(len(input_words), 1)
+
+    if a_relevance > b_relevance + 0.2:
+        return "A Wins", f"A is more relevant (overlap {a_relevance:.2f} vs {b_relevance:.2f})"
+    if b_relevance > a_relevance + 0.2:
+        return "B Wins", f"B is more relevant (overlap {b_relevance:.2f} vs {a_relevance:.2f})"
+    
+    # tie-break
+    return "Tie", "Both responses are similar or evaluation criteria could not distinguish clearly"
+
+
+def run_pairwise_suite(test_suite , model_a , model_b):
+    results = []
+    for test in test_suite:
+        output_a = run_model(model_a, test.input_text)
+        output_b = run_model(model_b, test.input_text)
+        winner , reason = simulate_pairwise_judge(test.input_text , output_a , output_b , test.reference_output)
+        results.append({
+            "test_case_id" : test.id,
+            "model_a" : model_a,
+            "model_b" : model_b,
+            "output_a" : output_a,
+            "output_b" : output_b,
+            "winner" : winner,
+            "reason" : reason,
+        })
+    return results
+
+def compute_win_rate_report(pairwise_results):
+    if not pairwise_results:
+        print("No results to report.")
+        return
+    
+    wins_a = 0
+    wins_b = 0
+    ties = 0
+    scores = []
+    
+    for r in pairwise_results:
+        winner = r["winner"]
+        if winner == "A Wins":
+            wins_a += 1
+            scores.append(0.0)
+        elif winner == "B Wins":
+            wins_b += 1
+            scores.append(1.0)
+        else:  # "Tie"
+            ties += 1
+            scores.append(0.5)
+    
+    total_cases = len(pairwise_results)
+    
+    # 1. Compute the win rate (percentage) of B
+    b_win_rate = (wins_b + 0.5 * ties) / total_cases
+    
+    # 2. Get the bootstrap confidence interval
+    lower_95_ci , mean_win_rate , upper_95_ci = bootstrap_confidence_interval(scores)
+    
+    # 3. Print the report
+    print("=" * 50)
+    print("  PAIRWISE WIN RATE REPORT")
+    print("=" * 50)
+    print(f"  Total comparisons: {total_cases}")
+    print(f"  A Wins (baseline): {wins_a}")
+    print(f"  B Wins (new):      {wins_b}")
+    print(f"  Ties:              {ties}")
+    # Print the win rate and the lower/upper bounds from the bootstrap interval
+    print(f"  B Win Rate:        {b_win_rate:.2%}")
+    print(f"  95% CI:            [{lower_95_ci:.2%} - {upper_95_ci:.2%}]")
+
+    print("=" * 50)
+
+# ============== ex-2 =============
 def generate_judge_reasoning(input_text, model_output, criterion, score):
     rubric = RUBRICS.get(criterion, {})
     description = rubric.get(score, "No rubric description available.")
@@ -367,6 +653,59 @@ def compare_eval_runs(baseline_results, new_results, criteria=None):
 
     return report
 
+# ---- ex3
+
+def compare_by_category(test_suite , baseline_results , new_results):
+    category_map = {tc.id : tc.category for tc in test_suite}
+    
+    baseline_scores_by_cat = {}
+    new_scores_by_cat = {}
+
+    for tc in test_suite:
+        baseline_scores_by_cat[tc.category] = []
+        new_scores_by_cat[tc.category] = []
+            
+    # 2. Populate
+    for r in baseline_results:
+        cat = category_map.get(r.test_case_id)
+        if cat:
+            baseline_scores_by_cat[cat].append(r.average_score())
+		
+    for r in new_results:
+        cat = category_map.get(r.test_case_id)
+        if cat:
+            new_scores_by_cat[cat].append(r.average_score())
+
+    # 3. Analyze and Print
+    print("=" * 70)
+    print("  STRATIFIED CATEGORY COMPARISON REPORT")
+    print("=" * 70)
+    print(f"{'Category':<15} {'Baseline':>10} {'New':>10} {'Diff':>8} {'Status':>12}")
+    print("-" * 70)
+	
+    for cat in sorted(baseline_scores_by_cat.keys()):
+        b_list = baseline_scores_by_cat[cat]
+        n_list = new_scores_by_cat[cat]
+        
+        if not b_list or not n_list:
+            continue
+        mean_baseline = statistics.mean(b_list)
+        mean_new = statistics.mean(n_list)
+        diff = mean_new - mean_baseline
+        ci_b = bootstrap_confidence_interval(b_list)
+        ci_n = bootstrap_confidence_interval(n_list)
+        if diff < -0.3:
+            status = "REGRESSION"
+        elif diff > 0.3:
+            status = "IMPROVED"
+        else:
+            status = "STABLE"
+        print(f"  {cat:<15} {mean_baseline:>10.3f} {mean_new:>10.3f} {diff:>+8.3f} {status:>12}")
+        print(f"  {'':15} CI: {ci_b} -> {ci_n}")
+
+# ---- ex3
+
+
 
 def print_comparison_report(report):
     print("=" * 70)
@@ -414,6 +753,15 @@ def run_demo():
         print(f"  ROUGE-L: {score:.4f}")
         print(f"    ref: {ref[:50]}")
         print(f"    hyp: {hyp[:50]}")
+    
+    # ex1
+    print(f"\n--- BERTScore Scores ---")
+    for ref, hyp in rouge_tests:
+        p, r, f1 = bert_score(ref, hyp)
+        print(f"  BERTScore - P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}")
+        print(f"    ref: {ref[:50]}")
+        print(f"    hyp: {hyp[:50]}")
+    # ex1
 
     print(f"\n--- LLM-as-Judge Scoring ---")
     sample_case = test_suite[1]
@@ -463,6 +811,31 @@ def run_demo():
     for cat, cat_scores in sorted(categories.items()):
         avg = sum(cat_scores) / len(cat_scores)
         print(f"  {cat}: avg={avg:.2f} ({len(cat_scores)} cases)")
+
+    #ex3
+    print(f"\n--- Stratified Category Comparison Report ---")
+    compare_by_category(test_suite, baseline_results, new_results)    
+    #ex3    
+
+    # ex2
+    
+    print(f"\n--- Pairwise Comparison: baseline-v1 vs baseline-v2 ---")
+    pairwise_results = run_pairwise_suite(test_suite, "baseline-v1", "baseline-v2")
+    for r in pairwise_results:
+        print(f"  [{r['test_case_id']}] winner={r['winner']} | reason={r['reason']}")
+    compute_win_rate_report(pairwise_results)
+    # ex2
+
+    # ex4
+    print(f"\n--- Inter-Rater Reliability Analysis ---")
+    calculate_judge_agreement(test_suite, "baseline-v1","correctness")
+    # ex4
+
+    # ex5
+    print(f"\n--- Cost Report ---")
+    print_cost_report()
+    #ex5
+
 
     print(f"\n--- Sample Size Analysis ---")
     for n in [50, 100, 200, 500, 1000]:
