@@ -3,6 +3,7 @@ import time
 import json
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 MODEL_PRICING = {
@@ -20,6 +21,53 @@ MODEL_PRICING = {
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "cached_input": 0.3125},
     "gemini-2.5-flash": {"input": 0.15, "output": 0.60, "cached_input": 0.0375},
 }
+
+class CircuitBreaker:
+    def __init__(self , training_data):
+        self.cost_tracker = CostTracker(monthly_budget=0.1)
+        self.cache = SemanticCacheLRU()
+        self.model = EmbeddingRouter(training_data)
+        self.warning_triggered = False
+        self.throttle_triggered = False
+        self.stop_triggered = False
+    
+    def get_status(self):
+        spent = self.cost_tracker.total_cost()
+        pct = spent / self.cost_tracker.monthly_budget
+        stop = pct >= 0.95
+        throttle = pct >= 0.85 and pct < 0.95
+        warning = pct >= 0.70 and pct < 0.85
+        return {"pct_spent": pct, "warning": warning, "throttle": throttle, "stop": stop}
+
+    def process_request(self , query):
+        status = self.get_status()
+        cached = self.cache.get(query)
+        if cached:
+            return {"status": "success", "response": cached["response"], "source": "cache"}
+        if status["stop"]:
+            if not self.stop_triggered:
+                print({"status": "rejected", "reason": f"Circuit breaker active (95% budget limit reached)"})
+                self.stop_triggered = True
+            return {"status": "rejected", "reason": f"Circuit breaker active (95% budget limit reached)"}
+        
+        # 1. Warning Alert check
+        if status["warning"] and not self.warning_triggered:
+            print(f"  ⚠️ ALERT [WARNING]: Budget has exceeded 70% (Spent:${self.cost_tracker.total_cost():.4f})")
+            self.warning_triggered = True
+
+        # 2. Model Selection (Independent block)
+        if status["throttle"]:
+            if not self.throttle_triggered:
+                print(f"  ⚡ ALERT [THROTTLE]: Budget has exceeded 85%! Switching to gpt-4o-mini.")
+                self.throttle_triggered = True
+            model = "gpt-4o-mini"
+        else:
+            model = self.model.route(query)["model"]
+        
+        sim_res = simulate_llm_call(model, query)
+        self.cost_tracker.log_call(model, sim_res["input_tokens"], sim_res["output_tokens"], latency_ms=sim_res["latency_ms"])
+        self.cache.put(query, sim_res["response"])
+        return {"status": "success", "response": sim_res["response"], "source": model}
 
 
 def calculate_cost(model, input_tokens, output_tokens, cached_input_tokens=0):
@@ -111,9 +159,61 @@ def cosine_similarity(a, b):
     dot = sum(a.get(k, 0) * b.get(k, 0) for k in all_keys)
     return dot
 
+class SemanticCacheLRU:
+    # modified
+    def __init__(self, similarity_threshold=0.85, max_size=10, ttl_seconds=3600):
+        self.entries = []
+        self.threshold = similarity_threshold
+        self.max_size = max_size
+        self.ttl = ttl_seconds
+        self.hits = 0
+        self.misses = 0
 
-class SemanticCache:
-    def __init__(self, similarity_threshold=0.85, max_size=500, ttl_seconds=3600):
+    def get(self, query):
+        query_embedding = simple_embed(query)
+        now = time.time()
+        best_match = None
+        best_sim = 0.0
+        for entry in self.entries:
+            if now - entry["timestamp"] > self.ttl:
+                continue
+            sim = cosine_similarity(query_embedding, entry["embedding"])
+            if sim > best_sim:
+                best_sim = sim
+                best_match = entry
+        if best_match and best_sim >= self.threshold:
+            self.hits += 1
+            best_match["access_count"] += 1
+            best_match["last_accessed"] = time.time()
+            return {"response": best_match["response"], "similarity": round(best_sim, 4), "original_query": best_match["query"]}
+        self.misses += 1
+        return None
+
+    def put(self, query, response):
+        if len(self.entries) >= self.max_size:
+            oldest = min(self.entries, key=lambda e: e["last_accessed"])
+            self.entries.remove(oldest)
+        self.entries.append({
+            "query": query,
+            "embedding": simple_embed(query),
+            "response": response,
+            "timestamp": time.time(),
+            "access_count": 1,
+            "last_accessed": time.time()
+        })
+
+    def stats(self):
+        total = self.hits + self.misses
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": round(self.hits / total, 4) if total > 0 else 0,
+            "cache_size": len(self.entries),
+        }
+    
+class SemanticCacheFIFO:
+    # original
+    def __init__(self, similarity_threshold=0.85, max_size=10, ttl_seconds=3600):
         self.entries = []
         self.threshold = similarity_threshold
         self.max_size = max_size
@@ -143,6 +243,7 @@ class SemanticCache:
     def put(self, query, response):
         if len(self.entries) >= self.max_size:
             self.entries.sort(key=lambda e: e["timestamp"])
+            # oldest = min(self.entries, key=lambda e: e["last_accessed"])
             self.entries.pop(0)
         self.entries.append({
             "query": query,
@@ -161,6 +262,63 @@ class SemanticCache:
             "cache_size": len(self.entries),
         }
 
+class TieredSemanticCache:
+    def __init__(self, similarity_threshold=0.85, max_size=500, ttl_seconds=3600):
+        self.entries = []
+        self.threshold = similarity_threshold
+        self.max_size = max_size
+        self.ttl = ttl_seconds
+        self.high_hits = 0
+        self.medium_hits = 0
+        self.misses = 0
+
+    def get(self, query):
+        query_embedding = simple_embed(query)
+        now = time.time()
+        best_match = None
+        best_sim = 0.0
+        for entry in self.entries:
+            if now - entry["timestamp"] > self.ttl:
+                continue
+            sim = cosine_similarity(query_embedding, entry["embedding"])
+            if sim > best_sim:
+                best_sim = sim
+                best_match = entry
+
+        if best_match and best_sim >= 0.98:
+            self.high_hits += 1
+            best_match["access_count"] += 1
+            return {"response": best_match["response"], "confidence": "high","similarity": round(best_sim, 4)}
+        elif best_match and best_sim >= 0.90:
+            self.medium_hits += 1
+            best_match["access_count"] += 1
+            disclaimer_response = f"Based on a similar previous question:{best_match['response']}"
+            return {"response": disclaimer_response, "confidence": "medium","similarity": round(best_sim, 4)}
+        else:
+            self.misses += 1
+            return None
+
+    def put(self, query, response):
+        if len(self.entries) >= self.max_size:
+            self.entries.sort(key=lambda e: e["timestamp"])
+            self.entries.pop(0)
+        self.entries.append({
+            "query": query,
+            "embedding": simple_embed(query),
+            "response": response,
+            "timestamp": time.time(),
+            "access_count": 1,
+        })
+
+    def stats(self):
+        total = self.high_hits + self.medium_hits + self.misses
+        return {
+            "high_hits": self.high_hits,
+            "medium_hits": self.medium_hits,
+            "misses": self.misses,
+            "hit_rate": round((self.high_hits + self.medium_hits) / total, 4) if total > 0 else 0,
+            "cache_size": len(self.entries),
+        }
 
 class TokenBucketRateLimiter:
     def __init__(self):
@@ -226,6 +384,38 @@ class TokenBucketRateLimiter:
             "utilization": round(b["total_tokens_used"] / b["capacity"], 4) if b["capacity"] else 0,
         }
 
+class EmbeddingRouter:
+    def __init__(self , training_data):
+        self.training_entries = []
+        for query , label in training_data:
+            self.training_entries.append({
+                "query": query,
+                "label": label,
+                "embedding": simple_embed(query)
+            })
+    
+    def classify(self , query):
+        query_emb = simple_embed(query)
+        best_label = "simple"
+        best_sim = -1.0
+
+        for entry in self.training_entries:
+            sim = cosine_similarity(query_emb , entry["embedding"])
+            if sim > best_sim:
+                best_sim = sim
+                best_label = entry["label"]
+
+        return best_label
+
+    def route(self , query , tier="pro"):
+        complexity = self.classify(query)
+        routing_table = {
+            "simple": {"free": "gpt-4.1-nano", "pro": "gpt-4o-mini","enterprise": "gpt-4o-mini"},
+            "medium": {"free": "gpt-4o-mini", "pro": "claude-sonnet-4","enterprise": "claude-sonnet-4"},
+            "complex": {"free": "gpt-4o-mini", "pro": "gpt-4o","enterprise": "claude-opus-4"},
+        }
+        model = routing_table[complexity].get(tier , "gpt-4o-mini")
+        return {"query" : query , "model" : model , "complexity" : complexity}
 
 class CostTracker:
     def __init__(self, monthly_budget=1000.0):
@@ -284,6 +474,39 @@ class CostTracker:
             full_cost = calculate_cost(e["model"], e["input_tokens"], e["output_tokens"])
             saved += full_cost["total_cost"]
         return {"saved": round(saved, 4), "cache_hits": len(cache_hits)}
+    
+    def project_monthly_cost(self):
+        now = time.time()
+        seven_days_sec = 7 * 86400
+        
+        recent_logs = [e for e in self.logs if now - e["timestamp"] <= seven_days_sec]
+        if not recent_logs:
+            return {"projected_monthly" : 0.0 , "alert" : False , "savings" : 0}
+        
+        weekday_costs = []
+        weekend_costs = []
+
+        for e in recent_logs:
+            day_of_week = datetime.fromtimestamp(e["timestamp"]).weekday()
+            if day_of_week < 5:
+                weekday_costs.append(e["cost"])
+            else:
+                weekend_costs.append(e["cost"])
+
+        avg_weekday = sum(weekday_costs) / len(weekday_costs) if weekday_costs else 0
+        avg_weekend = sum(weekend_costs) / len(weekend_costs) if weekend_costs else avg_weekday
+
+        projected_monthly = round((avg_weekday * 22) + (avg_weekend * 8), 2)
+        
+        budget_threshold = self.monthly_budget * 1.20
+        alert_triggered = projected_monthly > budget_threshold
+        return {
+            "projected_monthly_cost": projected_monthly,
+            "monthly_budget": self.monthly_budget,
+            "budget_threshold_120": round(budget_threshold, 2),
+            "alert_triggered": alert_triggered,
+            "status": "DANGER: Exceeds 120% budget!" if alert_triggered else "OK"
+        }
 
     def summary(self):
         if not self.logs:
@@ -365,7 +588,7 @@ def run_demo():
     print(f"  Savings per call: ${saving:.6f} ({saving/no_cache['total_cost']*100:.1f}%)")
 
     exact_cache = ExactCache(max_size=100, ttl_seconds=300)
-    semantic_cache = SemanticCache(similarity_threshold=0.75, max_size=100)
+    semantic_cache = SemanticCacheLRU(similarity_threshold=0.75, max_size=100)
     rate_limiter = TokenBucketRateLimiter()
     tracker = CostTracker(monthly_budget=100.0)
 
@@ -399,6 +622,131 @@ def run_demo():
         else:
             print(f"  '{query[:40]}' -> MISS (no match)")
     print(f"  Stats: {semantic_cache.stats()}")
+
+    print("\n--- Exercise 1: 50-Query Benchmark (FIFO vs LRU) ---")
+    fifo_cache = SemanticCacheFIFO(similarity_threshold=0.85, max_size=3)
+    lru_cache = SemanticCacheLRU(similarity_threshold=0.85, max_size=3)
+
+    core_queries = [
+        "What is the return policy?",
+        "What are your store hours?",
+        "How do I track my order?"
+    ]
+
+    for i in range(50):
+        if i % 4 != 0:
+            query = core_queries[i % len(core_queries)]
+        else:
+            query = f"Can I get help with issue item #{i}?"
+
+        res_fifo = fifo_cache.get(query)
+        if not res_fifo:
+            fifo_cache.put(query, f"Response to {query}")
+
+        res_lru = lru_cache.get(query)
+        if not res_lru:
+            lru_cache.put(query, f"Response to {query}")
+
+    print(f"  FIFO Cache Stats (max_size=3): {fifo_cache.stats()}")
+    print(f"  LRU Cache Stats (max_size=3):  {lru_cache.stats()}")
+
+
+    print("\n--- Exercise 2: Cost Projection Demo ---")
+    test_tracker = CostTracker(monthly_budget=10.00) # $10 budget
+
+    # Simulate 50 calls (which will spend ~$0.30-$0.40 in real-time)
+    for _ in range(50):
+        test_tracker.log_call("gpt-4o", 1000, 500)
+
+    projection = test_tracker.project_monthly_cost()
+    print(f"  Projected Monthly Cost: ${projection['projected_monthly_cost']}")
+    print(f"  Monthly Budget: ${projection['monthly_budget']}")
+    print(f"  Alert Triggered: {projection['alert_triggered']} ({projection['status']})")
+
+    print("\n--- Exercise 3: Tiered Semantic Cache Demo ---")
+    tiered_cache = TieredSemanticCache()
+    tiered_cache.put("What is the return policy?", "Items can be returned within 30 days.")
+
+    # 1. Exact match -> High confidence
+    res_high = tiered_cache.get("What is the return policy?")
+    print(f"  Exact match query -> Confidence: {res_high['confidence']}")
+
+    # 2. Paraphrased match -> Medium confidence (or High depending on simple_embed)
+    res_med = tiered_cache.get("What is our return policy?")
+    if res_med:
+        print(f"  Paraphrased query -> Confidence: {res_med['confidence']}")
+        print(f"  Response text: {res_med['response']}")
+
+    print(f"  Tiered Stats: {tiered_cache.stats()}")
+
+    print("\n--- Exercise 4: Embedding Router Demo ---")
+    training_data = [
+        # Simple queries
+        ("What time do you close?", "simple"),
+        ("What is your phone number?", "simple"),
+        ("Where is the store located?", "simple"),
+        ("What are your business hours?", "simple"),
+        ("Hello how are you?", "simple"),
+        
+        # Medium queries
+        ("Summarize this document for me", "medium"),
+        ("Compare product A and product B", "medium"),
+        ("Explain the difference between TCP and UDP", "medium"),
+        ("What are the key takeaways from the report?", "medium"),
+        
+        # Complex queries
+        ("Write code for a binary search tree with deletion in Python","complex"),
+        ("Analyze the trade-offs between microservices and monolithic architectures", "complex"),
+        ("Debug this memory leak in my C++ application", "complex"),
+        ("Design a distributed rate-limiting system using Redis", "complex")
+    ]
+
+    router = EmbeddingRouter(training_data)
+
+    test_set = [
+        ("When does the shop open?", "simple"),
+        ("What is your contact number?", "simple"),
+        ("Hi there", "simple"),
+        ("Summarize the quarterly sales results", "medium"),
+        ("Explain microservices architecture", "complex"),
+        ("Write a python function for quicksort", "complex")
+    ]
+
+    correct = 0
+    for q, true_label in test_set:
+        res = router.route(q)
+        pred_label = res["complexity"]
+        if pred_label == true_label:
+            correct += 1
+        print(f"  Query: '{q}' -> Predicted: {pred_label} (Actual: {true_label})")
+
+    print(f"  Accuracy: {correct}/{len(test_set)} ({correct/len(test_set)*100:.1f}%)")
+
+    print("\n--- Exercise 5: Circuit Breaker 1,000-Request Simulation ---")
+    cb = CircuitBreaker(training_data)
+    cb.cost_tracker.monthly_budget = 0.05
+
+    blocked_count = 0
+    throttled_count = 0
+    normal_count = 0
+
+    for i in range(1000):
+        # Pass a complex query so we can see throttling degrade it to gpt-4o-mini
+        query = f"Unique distinct request topic number {i} code {i*37}"
+        res = cb.process_request(query)
+        
+        if res["status"] == "rejected":
+            blocked_count += 1
+        elif res.get("source") == "gpt-4o-mini" and cb.get_status()["throttle"]:
+            throttled_count += 1
+        else:
+            normal_count += 1
+
+    print(f"\n  Simulation Results over 1,000 Requests against $1.00 Budget:")
+    print(f"  Normal / Standard Calls: {normal_count}")
+    print(f"  Throttled Calls (gpt-4o-mini): {throttled_count}")
+    print(f"  Blocked Calls (95% Stop): {blocked_count}")
+    print(f"  Final Spent: ${cb.cost_tracker.total_cost():.4f} / ${cb.cost_tracker.monthly_budget}")
 
     print("\n--- Rate Limiting ---")
     for i in range(12):
@@ -448,7 +796,7 @@ def run_demo():
 
     print("\n  [After: caching + routing + rate limiting]")
     exact_c = ExactCache()
-    semantic_c = SemanticCache(similarity_threshold=0.75)
+    semantic_c = SemanticCacheLRU(similarity_threshold=0.75)
     tracker_after = CostTracker(monthly_budget=1000.0)
 
     for q in queries:
@@ -503,8 +851,7 @@ def run_demo():
 
     print("\n" + "=" * 60)
     print("  Demo complete.")
-    print("=" * 60)
-
+    print("=" * 60)   
 
 if __name__ == "__main__":
     run_demo()
