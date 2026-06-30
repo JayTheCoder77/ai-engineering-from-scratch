@@ -28,6 +28,177 @@ MODEL_PRICING = {
 FALLBACK_CHAIN = [ModelName.CLAUDE_SONNET, ModelName.GPT_4O, ModelName.GPT_4O_MINI]
 
 
+SAMPLE_DOCUMENTS = [
+    # --- 🔬 Science & Technology Topics ---
+
+    """[TECH] Quantum Computing Fundamentals: Quantum computers 
+leverage principles like superposition and entanglement to perform 
+calculations far beyond the reach of classical machines. Qubits, unlike 
+classical bits (0 or 1), can exist as both states simultaneously, 
+dramatically increasing computational power for specific tasks like 
+drug discovery and cryptography cracking.""",
+    
+    """[BIO] CRISPR-Cas9 Gene Editing: The revolutionary gene-editing 
+tool, CRISPR-Cas9, allows scientists to precisely cut and paste DNA 
+sequences. It fundamentally changed genetic research by offering an 
+efficient and scalable method to correct faulty genes responsible for 
+inherited diseases like sickle cell anemia.""",
+
+    """[ASTRONOMY] Exoplanet Discovery Methods: Detecting planets 
+outside our solar system is challenging. Current primary methods 
+include the transit method (measuring the slight dip in starlight as a 
+planet passes in front of its star) and radial velocity measurements 
+(detecting stellar "wobbles" caused by gravitational pull).""",
+    
+    """[AI] Large Language Model Architectures: LLMs, such as GPT-4, 
+utilize the Transformer architecture. This system processes input data 
+using self-attention mechanisms, allowing the model to weigh the 
+importance of different words relative to each other across an entire 
+sequence, which is crucial for coherent text generation.""",
+    
+    """[ECOLOGY] Deep Sea Vents and Chemosynthesis: Unlike surface life 
+that relies on sunlight (photosynthesis), deep-sea vent organisms 
+thrive through chemosynthesis. They metabolize chemicals like hydrogen 
+sulfide from hydrothermal vents, forming the base of unique food chains 
+entirely independent of solar energy.""",
+
+    # --- 💰 Finance & Economics Topics ---
+    
+    """[FINANCE] Inflation and Monetary Policy: Inflation is generally 
+defined as a sustained increase in the general price level of goods and 
+services. Central banks combat it by raising interest rates, which 
+increases borrowing costs, slows economic activity, and reduces 
+aggregate demand.""",
+
+    """[ECONOMICS] Supply Chain Disruptions: Modern supply chains are 
+highly complex networks involving multiple nodes (manufacturers, 
+shippers, ports). Disruptions—such as geopolitical conflicts or 
+pandemics—can cause cascading bottlenecks, leading to global shortages 
+of essential goods like microchips.""",
+    
+    """[FINTECH] Decentralized Finance (DeFi): DeFi refers to financial 
+services that utilize blockchain technology and smart contracts (like 
+those on Ethereum) to operate without traditional intermediaries 
+(banks, brokers). This aims to create an open, permissionless, and 
+transparent global financial system.""",
+
+    # --- 📜 History & Culture Topics ---
+    
+    """[HISTORY] The Pax Romana: This period of relative peace (roughly 
+27 BCE - 180 CE) saw the Roman Empire solidify its control over vast 
+territories. Key to its stability was a highly organized military, 
+extensive road networks, and standardized legal codes.""",
+
+    """[ART HISTORY] Renaissance Perspective: The artistic innovations 
+of the Italian Renaissance focused heavily on creating realistic depth 
+and space on flat surfaces. Techniques like linear perspective, 
+pioneered by Filippo Brunelleschi, allowed artists to make 
+two-dimensional paintings appear three-dimensional.""",
+    
+    """[HISTORY] Cold War Proxy Conflicts: During the latter half of 
+the 20th century, superpower tensions (US vs. USSR) rarely led to 
+direct military conflict. Instead, proxy wars—where intervening powers 
+supported opposing local factions—were common, such as in Korea or 
+Vietnam.""",
+
+    # --- 🌿 Environmental & Health Topics ---
+    
+    """[CLIMATE] Ocean Acidification: As the ocean absorbs excess 
+atmospheric CO2, its pH decreases, making it more acidic. This poses a 
+severe threat to calcifying marine life (like coral and shellfish), as 
+the chemical changes make it difficult for them to build their 
+protective shells.""",
+
+    """[PUBLIC HEALTH] Epidemiology and Disease Outbreaks: Epidemiology 
+is the study of how diseases spread through populations. Key metrics 
+include incidence (new cases over time) and prevalence (total existing 
+cases), allowing public health officials to model and predict future 
+outbreaks accurately.""",
+    
+    """[ENVIRONMENT] Biodiversity Hotspots: These are regions with high 
+levels of biodiversity that are also experiencing a high degree of 
+threat (e.g., tropical rainforests, coral reefs). Conservation efforts 
+prioritize these areas due to their irreplaceable ecological value.""",
+
+    # --- 📚 Humanities & Theoretical Topics ---
+    
+    """[PHILOSOPHY] Existentialism: A philosophical movement 
+emphasizing individual freedom and will. Key tenets include the idea 
+that 'existence precedes essence,' meaning that humans are born without 
+inherent purpose and must define their own meanings through 
+choices.""",
+    
+    """[LITERATURE] Magical Realism Genre: This literary style, popular 
+in Latin America, blends realistic elements with fantastical or magical 
+occurrences treated as normal parts of the setting. Examples include 
+Márquez's 'One Hundred Years of Solitude.'""",
+
+    # --- ⚡ Energy & Governance Topics ---
+
+    """[ENERGY] Grid Modernization and Smart Grids: Traditional power 
+grids were designed for one-way electricity flow (from plant to 
+consumer). Modern "smart grids" incorporate two-way communication, 
+integrating distributed energy resources like rooftop solar panels and 
+optimizing load management in real-time.""",
+    
+    """[BIOLOGY] Metabolic Pathways: Metabolism encompasses all 
+chemical reactions that occur within a living organism. These 
+pathways—such as glycolysis (breaking down glucose) or the Krebs 
+cycle—govern how nutrients are converted into usable cellular energy 
+(ATP).""",
+
+    # --- 🚀 Mixed Topics ---
+    
+    """[GOVERNANCE] Treaty of Versailles: Signed after WWI, this treaty 
+was intended to formally end the war and assign blame. However, many 
+historians argue that its harsh reparations and territorial clauses 
+contributed significantly to political instability in Germany during 
+the interwar period.""",
+
+]
+
+class InMemVectorStore:
+    def __init__(self , sample_docs):
+        self.store = {}
+        for idx , doc in enumerate(sample_docs):
+            self.store[idx] = {
+                "text" : doc,
+                "embedding" : simple_embedding(doc)
+            }
+    
+    def search(self , query :str , top_k : int = 3):
+        query_emb = simple_embedding(query)
+        scores = []
+        for idx , doc in self.store.items():
+            score = cosine_similarity(query_emb , doc["embedding"])
+            scores.append((score , doc))
+        
+        scores.sort(key=lambda x : x[0] , reverse=True)
+        return [doc for score , doc in scores[:top_k]]
+    
+@dataclass
+class Span:
+    name:str
+    start_time:float
+    end_time:float = 0.0
+    duration_ms:float = 0.0
+    attributes:dict = field(default_factory=dict)
+
+
+
+    def finish(self):
+        self.end_time = time.time()
+        self.duration_ms = round((self.end_time - self.start_time) * 1000 , 2)
+
+class Tracer:
+    def __init__(self):
+        self.spans = []
+
+    def start_span(self , name:str , attributes:dict = None) -> Span:
+        span = Span(name , start_time=time.time() , attributes= attributes or {})
+        self.spans.append(span)
+        return span
+
 @dataclass
 class RequestLog:
     request_id: str
@@ -43,8 +214,8 @@ class RequestLog:
     guardrail_input_pass: bool
     guardrail_output_pass: bool
     cost_usd: float
+    retrieval_latency:float = 0.0
     error: str | None = None
-
 
 @dataclass
 class CostTracker:
@@ -63,6 +234,9 @@ class CostTracker:
         self.total_requests += 1
         self.cost_by_user[user_id] += cost
         self.cost_by_model[model] += cost
+
+    def get_user_cost(self , user_id):
+        return self.cost_by_user[user_id]
 
     def summary(self):
         avg_cost = self.total_cost_usd / max(self.total_requests, 1)
@@ -419,6 +593,84 @@ async def stream_response(text):
         yield token
         await asyncio.sleep(random.uniform(0.02, 0.08))
 
+TOOL_REGISTRY={}
+
+def register_tool(name, description, parameters, function):
+    TOOL_REGISTRY[name] = {
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            },
+        },
+        "function": function,
+    }
+
+def calculator(expression, precision=2):
+    allowed = set("0123456789+-*/.() ")
+    if not all(c in allowed for c in expression):
+        return {"error": True, "message": f"Invalid characters in expression: {expression}"}
+    try:
+        result = eval(expression, {"__builtins__": {}}, {"math": math})
+        return {"result": round(float(result), precision), "expression": expression}
+    except Exception as e:
+        return {"error": True, "message": str(e)}
+
+WEATHER_DB = {
+    "tokyo": {"temp_c": 18, "condition": "cloudy", "humidity": 72, "wind_kph": 14},
+    "new york": {"temp_c": 22, "condition": "sunny", "humidity": 45, "wind_kph": 8},
+    "london": {"temp_c": 12, "condition": "rainy", "humidity": 88, "wind_kph": 22},
+    "san francisco": {"temp_c": 16, "condition": "foggy", "humidity": 80, "wind_kph": 18},
+    "sydney": {"temp_c": 25, "condition": "sunny", "humidity": 55, "wind_kph": 10},
+}
+
+
+def get_weather(city, units="celsius"):
+    key = city.lower().strip()
+    if key not in WEATHER_DB:
+        suggestions = [c for c in WEATHER_DB if c.startswith(key[:3])]
+        return {
+            "error": True,
+            "message": f"City '{city}' not found.",
+            "suggestions": suggestions,
+            "code": "CITY_NOT_FOUND",
+        }
+    data = WEATHER_DB[key].copy()
+    if units == "fahrenheit":
+        data["temp_f"] = round(data["temp_c"] * 9 / 5 + 32, 1)
+        del data["temp_c"]
+    data["city"] = city
+    return data
+
+register_tool(
+    "calculator",
+    "Evaluate a mathematical expression. Supports +, -, *, /, parentheses, and decimals. Returns the numeric result.",
+    {
+        "type": "object",
+        "properties": {
+            "expression": {"type": "string", "description": "Math expression, e.g. '(10 + 5) * 3'"},
+            "precision": {"type": "integer", "description": "Decimal places in result", "default": 2},
+        },
+        "required": ["expression"],
+    },
+    calculator,
+)
+register_tool(
+    "get_weather",
+    "Get current weather for a city. Returns temperature, condition, humidity, and wind speed.",
+    {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City name, e.g. 'Tokyo' or 'San Francisco'"},
+            "units": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature units, defaults to celsius"},
+        },
+        "required": ["city"],
+    },
+    get_weather,
+)
+
 
 class ProductionLLMService:
     def __init__(self):
@@ -426,14 +678,23 @@ class ProductionLLMService:
         self.cost_tracker = CostTracker()
         self.request_logs = []
         self.eval_results = []
-
+        self.vector_store = InMemVectorStore(SAMPLE_DOCUMENTS)
+        self.version_stats = defaultdict(lambda: {"requests": 0, "errors": 0, "total_latency": 0})
+    
+    
     async def handle_request(self, user_id, query, template_name="general_chat", variables=None):
+        tracer = Tracer()
         request_id = str(uuid.uuid4())[:12]
         start_time = time.time()
         variables = variables or {}
         variables["query"] = query
+        retrieval_time_ms = 0.0
+        tools_used = []
+        preferred_model = None
 
+        guardrail_span = tracer.start_span("input_guardrail")
         input_check = check_input_guardrails(query)
+        guardrail_span.finish()
         if not input_check.passed:
             return self._blocked_response(request_id, user_id, template_name, input_check, start_time)
 
@@ -441,7 +702,19 @@ class ProductionLLMService:
         if input_check.modified_text:
             variables["query"] = effective_query
 
+        is_emergency = self.cost_tracker.total_cost_usd > 0.005
+
+        if is_emergency:
+            if estimate_tokens(query) > 2000:
+                return self._blocked_response(request_id, user_id,template_name, GuardrailResult(passed=False, blocked_reason="Emergency mode: token limit exceeded"), start_time)
+            # return cached responses only
+            preferred_model = ModelName.GPT_4O_MINI
+        elif self.cost_tracker.get_user_cost(user_id) > 0.001:
+            preferred_model = ModelName.GPT_4O_MINI
+
+        cache_span = tracer.start_span("cache_lookup")
         cached = self.cache.get(effective_query)
+        cache_span.finish()
         if cached:
             self.cost_tracker.total_cache_hits += 1
             log = RequestLog(
@@ -470,8 +743,40 @@ class ProductionLLMService:
                 "cost_usd": 0.0,
             }
 
+        calc_keywords = ["calculate" , "add" , "subtract" , "multiply" , "divide" , "2 + 2" , "5 * 10"]
+        weather_keywords = ["tokyo" , "paris" , "weather" , "sunny" , "winter" , "new york" , "london" , "San fransisco" , "sydney"]
+        
+        tool_span = tracer.start_span("tool_use")
+        if any(kw in effective_query.lower() for kw in calc_keywords):
+            expression = "".join(c for c in effective_query if c.isdigit() or c in "+-*/.()")
+            calc_res = TOOL_REGISTRY["calculator"]["function"](expression)
+            tools_used.append("calculator")
+            variables['query'] += f"\n\n[Tool Output (calculator)]: {calc_res}"
+        if any(kw in effective_query.lower() for kw in weather_keywords):
+            city_list = [city for city in WEATHER_DB if city in effective_query.lower()]
+            for city in city_list:
+                weather_details = TOOL_REGISTRY["get_weather"]["function"](city=city)
+                tools_used.append("get_weather")
+                variables['query'] += f"\n\n[Tool Output (get_weather)]: {weather_details}"
+        tool_span.finish()
+        
+        rag_span = tracer.start_span("rag_retrieval")
+        if template_name == "rag_answer" and "context" not in variables:
+            retrieval_start = time.time()
+            retrieved = self.vector_store.search(effective_query , top_k=3)
+            retrieval_time_ms = round((time.time() - retrieval_start) * 1000, 2)
+            formatted_retrieved = "\n\n".join(
+                f"CONTEXT {idx+1}\n{doc['text']}\n" for idx , doc in enumerate(retrieved)
+            )
+            variables["context"] = formatted_retrieved
+        rag_span.finish() 
+
         template, rendered_prompt = select_prompt(template_name, user_id, variables)
-        result = await call_with_fallback(rendered_prompt, template.model)
+        
+        llm_span = tracer.start_span("llm_call")
+        result = await call_with_fallback(rendered_prompt, preferred_model or template.model)
+        llm_span.finish()
+
 
         output_check = check_output_guardrails(result["text"])
         if not output_check.passed:
@@ -500,6 +805,7 @@ class ProductionLLMService:
             guardrail_input_pass=True,
             guardrail_output_pass=output_check.passed,
             cost_usd=cost,
+            retrieval_latency=retrieval_time_ms if template_name == "rag_answer" else 0.0,
             error=result.get("error"),
         )
         self.request_logs.append(log)
@@ -518,9 +824,12 @@ class ProductionLLMService:
             "output_tokens": result["output_tokens"],
             "latency_ms": latency_ms,
             "cost_usd": cost,
+            "tools_used" :tools_used,
             "pii_detected": input_check.pii_detected,
             "guardrail_output_pass": output_check.passed,
+            "spans" : [{"name" : s.name , "duration_ms" : s.duration_ms} for s in tracer.spans]
         }
+
 
     async def handle_streaming_request(self, user_id, query, template_name="general_chat"):
         result = await self.handle_request(user_id, query, template_name)
@@ -570,6 +879,30 @@ class ProductionLLMService:
             "latency_ms": latency_ms,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
+        version_key = f"{template_name}:{version}"
+        self.version_stats[version_key]["requests"] += 1
+        if result.get("error"):
+            self.version_stats[version_key]["errors"] += 1
+        self.version_stats[version_key]["total_latency"] += latency_ms
+
+        self.check_and_rollback(template_name)
+    
+    def check_and_rollback(self , template_name : str):
+
+        stats_v1 = self.version_stats[f"{template_name}:v1"]
+        stats_v2 = self.version_stats[f"{template_name}:v2"]
+
+        error_rate_v1 = stats_v1["errors"] / max(stats_v1["requests"] , 1)
+        error_rate_v2 = stats_v2["errors"] / max(stats_v2["requests"] , 1)
+
+        if stats_v2["requests"] >= 10 and error_rate_v2 >= 2 * error_rate_v1:
+            for exp in AB_EXPERIMENTS.values():
+                if exp["template"] == template_name and exp["traffic_pct"] > 0:
+                    exp["traffic_pct"] = 0
+                    print(f"  [ROLLBACK TRIGGERED] Reverted {template_name} traffic to control (v1)")
+
+        # if error_rate_v2 > error_rate_v1 * 2:
+        #     self.templates[template_name] = PROMPT_TEMPLATES[template_name](v1)
 
     def health_check(self):
         return {
@@ -595,18 +928,48 @@ async def run_production_demo():
         ("user_002", "How does photosynthesis work?", "general_chat"),
         ("user_003", "Explain the RAG architecture", "rag_answer"),
         ("user_001", "What is the capital of France?", "general_chat"),
+        ("user_001", "What principles do quantum computers use?", "rag_answer"),
+        ("user_008", "What is the weather in Tokyo?", "general_chat"),
+        ("user_009", "Calculate 5 * 10", "general_chat")
     ]
+
 
     for user_id, query, template in test_queries:
         result = await service.handle_request(
             user_id, query, template,
-            variables={"context": "RAG uses retrieval to augment generation."} if template == "rag_answer" else None,
+            variables=None
         )
         cached = "CACHE HIT" if result.get("cache_hit") else result.get("model", "unknown")
         print(f"  [{result['request_id']}] {user_id}: {query[:50]}")
         print(f"    -> {cached} | {result['latency_ms']}ms | ${result['cost_usd']}")
         print(f"    -> {result.get('response', result.get('reason', ''))[:80]}...")
+        print(f"    -> tools used: {result.get('tools_used', [])}")
+        print(f"    -> latency breakdown:")
+        for span in result.get("spans", []):
+            print(f"       |-- {span['name']}: {span['duration_ms']}ms")
 
+    print("\n--- ex 3 Cost Alerting & Emergency Mode Tests ---")
+    # 1. Test User Spend Limit (user_001 already spent > $0.001 in earlier requests)
+    tier_result = await service.handle_request("user_001", "Explain machine learning in simple terms")
+    print(f"  User Spend Tiering -> Model used: {tier_result.get('model')} | Cost: ${tier_result.get('cost_usd')}")
+
+    # 2. Test Emergency Mode Token Cap (total daily spend is already > 0.005)
+    large_query = "explain " * 2500
+    emerg_result = await service.handle_request("user_010", large_query)
+    print(f"  Emergency Token Cap -> Response: {emerg_result.get('response')}")
+
+    print("\n--- ex 4 Prompt Versioning & Rollback Test ---")
+    service.version_stats["general_chat:v2"]["requests"] = 12
+    service.version_stats["general_chat:v2"]["errors"] = 6
+    service.check_and_rollback("general_chat")
+    print("  Current Version Stats:")
+    for v_key, stats in service.version_stats.items():
+        reqs = stats["requests"]
+        errs = stats["errors"]
+        rate = errs / max(reqs, 1)
+        print(f"    {v_key}: requests={reqs}, errors={errs},error_rate={rate:.2%}")
+
+    
     print("\n--- Streaming Request ---")
     stream_result = await service.handle_streaming_request("user_004", "Tell me about machine learning")
     print(f"  Streamed: {stream_result.get('streamed', False)}")
