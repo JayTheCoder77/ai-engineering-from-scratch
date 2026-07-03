@@ -22,9 +22,11 @@ Run:
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, TypedDict , NotRequired
+from pydantic import BaseModel , Field
 
-from langchain_anthropic import ChatAnthropic
+# from langchain_anthropic import ChatAnthropic
+from langchain_ollama import ChatOllama
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
@@ -33,14 +35,22 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-
 # State ----------------------------------------------------------------------
 
 
 class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+    plan : NotRequired[Annotated[list[str] , plan_reducer]]
 
+class Plan(BaseModel):
+    steps : list[str] = Field(description="The list of steps to solve the user request")
 
+# custom plan reducer
+def plan_reducer(left: list[str] | None , right : list[str] | None) -> list[str]:
+    if right is None:
+        return left or []
+    else:
+        return right
 # Tools ----------------------------------------------------------------------
 
 
@@ -74,13 +84,32 @@ TOOLS = [calculator, web_lookup]
 # Graph ----------------------------------------------------------------------
 
 
-def build_app() -> tuple:
+def build_app(llm = None , planner_llm = None) -> tuple:
     """Wire the four-node ReAct graph and return (compiled_app, llm_with_tools)."""
-    llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0).bind_tools(TOOLS)
+    # llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0).bind_tools(TOOLS)
+    if llm is None:
+        llm = ChatOllama(model="gemma4:e4b", temperature=0).bind_tools(TOOLS)
+    if planner_llm is None:
+        planner_llm = ChatOllama(model="gemma4:e4b", temperature=0).with_structured_output(Plan)
+
+    
+    def planner_node(state: State) -> dict:
+        user_query = state["messages"][-1].content
+        prompt = (
+            "You are a planning assistant. Break down the following user request "
+            "into a sequence of discrete steps. The available tools are 'web_lookup' "
+            "and 'calculator'.\n"
+            f"Request: {user_query}"
+        )
+        plan = planner_llm.invoke(prompt)
+        return {"plan" : plan.steps}
 
     def agent_node(state: State) -> dict:
+        current_plan = list(state.get("plan" , []))
+        if state["messages"][-1].type == "tool" and current_plan:
+            current_plan.pop(0)
         response = llm.invoke(state["messages"])
-        return {"messages": [response]}
+        return {"messages": [response] , "plan" : current_plan}
 
     def should_continue(state: State) -> str:
         last = state["messages"][-1]
@@ -89,10 +118,12 @@ def build_app() -> tuple:
     tool_node = ToolNode(TOOLS)
 
     graph = StateGraph(State)
+    graph.add_node("plan", planner_node)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
-    graph.set_entry_point("agent")
+    graph.set_entry_point("plan")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_edge("plan", "agent")
     graph.add_edge("tools", "agent")
 
     app = graph.compile(
@@ -122,8 +153,9 @@ def run() -> None:
     for event in app.stream({"messages": [user]}, config, stream_mode="updates"):
         for node, update in event.items():
             print(f"<<{node}>>")
-            for m in update.get("messages", []):
-                print("   ", pretty(m))
+            if isinstance(update, dict):
+                for m in update.get("messages", []):
+                    print("   ", pretty(m))
 
     # We are now paused at interrupt_before=['tools'].
     pending = app.get_state(config)
@@ -136,8 +168,9 @@ def run() -> None:
     for event in app.stream(Command(resume=True), config, stream_mode="updates"):
         for node, update in event.items():
             print(f"<<{node}>>")
-            for m in update.get("messages", []):
-                print("   ", pretty(m))
+            if isinstance(update, dict):
+                for m in update.get("messages", []):
+                    print("   ", pretty(m))
 
     # Checkpoint history.
     history = list(app.get_state_history(config))
@@ -155,14 +188,16 @@ def run() -> None:
         for event in app.stream(fork, earliest, stream_mode="updates"):
             for node, update in event.items():
                 print(f"<<{node}>>")
-                for m in update.get("messages", []):
-                    print("   ", pretty(m))
+                if isinstance(update, dict):
+                    for m in update.get("messages", []):
+                        print("   ", pretty(m))
         # Resume past the interrupt for the math tool.
         for event in app.stream(Command(resume=True), earliest, stream_mode="updates"):
             for node, update in event.items():
                 print(f"<<{node}>>")
-                for m in update.get("messages", []):
-                    print("   ", pretty(m))
+                if isinstance(update, dict):
+                    for m in update.get("messages", []):
+                        print("   ", pretty(m))
 
 
 if __name__ == "__main__":
