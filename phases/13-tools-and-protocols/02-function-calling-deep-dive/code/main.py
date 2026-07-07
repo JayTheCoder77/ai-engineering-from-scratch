@@ -12,7 +12,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, asdict
 from typing import Any
-
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../01-the-tool-interface/code")))
+from utils import validate
 
 @dataclass
 class Tool:
@@ -46,12 +49,44 @@ WEATHER = Tool(
         "properties": {
             "city": {"type": "string"},
             "units": {"type": ["string", "null"], "enum": ["celsius", "fahrenheit"]},
+            "format" : {"type" : "string", "enum" : ["json", "xml"]}
         },
-        "required": ["city", "units"],
+        "required": ["city", "units" , "format"],
         "additionalProperties": False,
     },
 )
 
+ANTHROPIC_LIST_RESPONSE = {
+    "tools" : [
+        {
+            "name": "get_weather",
+            "description": "Use when the user asks about current conditions in a named city. Do not use for forecasts or historical weather data.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "units": {"type": ["string", "null"], "enum": ["celsius", "fahrenheit"]},
+                    "format" : {"type" : "string", "enum" : ["json", "xml"]}
+                },
+                "required": ["city", "units" , "format"],
+            },
+        }
+    ]
+}
+
+GEMINI_LIST_RESPONSE = {
+    "functionDeclarations": [
+        {
+            "name": "get_weather",
+            "description": "Get current conditions",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {"city": {"type": "STRING"}},
+                "required": ["city"]
+            }
+        }
+    ]
+}
 
 def to_openai(tool: Tool) -> dict:
     return {
@@ -79,9 +114,18 @@ def _gemini_schema(node: Any) -> Any:
         for k, v in node.items():
             if k == "additionalProperties":
                 continue
-            if k == "type" and isinstance(v, str):
-                out["type"] = v.upper()
-                continue
+            if k == "type":
+                if isinstance(v, str):
+                    if "null" in v:
+                        out["nullable"] = True
+                    out["type"] = v.upper()
+                    continue
+                elif isinstance(v, list):
+                    not_null = [i.upper() for i in v if i != "null"]
+                    if "null" in v:
+                        out["nullable"] = True
+                    out["type"] = not_null[0]
+                    continue
             out[k] = _gemini_schema(v)
         return out
     if isinstance(node, list):
@@ -100,6 +144,32 @@ def to_gemini(tool: Tool) -> dict:
         ]
     }
 
+def parse_list_tools_anthropic(resp : dict) -> list[Tool]:
+    tools = []
+    for t in resp["tools"]:
+        tools.append(
+            Tool(
+                name=t["name"],
+                description=t["description"],
+                input_schema=t["input_schema"],
+            )
+        )
+    return tools
+
+def parse_list_tools_openai(resp : dict):
+    raise NotImplementedError("OpenAI does not support list_tools natively")
+
+def parse_list_tools_gemini(resp : dict) -> list[Tool]:
+    tools = []
+    for t in resp["functionDeclarations"]:
+        tools.append(
+            Tool(
+                name=t["name"],
+                description=t["description"],
+                input_schema=t["parameters"],
+            )
+        )
+    return tools
 
 def tool_choice_openai(tc: ToolChoice) -> Any:
     if tc.mode == "auto":
@@ -107,6 +177,8 @@ def tool_choice_openai(tc: ToolChoice) -> Any:
     if tc.mode == "none":
         return "none"
     if tc.mode == "required":
+        return "required"
+    if tc.mode == "any":
         return "required"
     if tc.mode == "force":
         return {"type": "function", "function": {"name": tc.tool_name}}
@@ -120,13 +192,15 @@ def tool_choice_anthropic(tc: ToolChoice) -> dict:
         return {"type": "none"}
     if tc.mode == "required":
         return {"type": "any"}
+    if tc.mode == "any":
+        return {"type": "any"}
     if tc.mode == "force":
         return {"type": "tool", "name": tc.tool_name}
     raise ValueError(tc.mode)
 
 
 def tool_choice_gemini(tc: ToolChoice) -> dict:
-    mode_map = {"auto": "AUTO", "none": "NONE", "required": "ANY"}
+    mode_map = {"auto": "AUTO", "none": "NONE", "required": "ANY" , "any" : "ANY"}
     if tc.mode in mode_map:
         return {"function_calling_config": {"mode": mode_map[tc.mode]}}
     if tc.mode == "force":
@@ -197,6 +271,11 @@ GEMINI_RESPONSE = {
     ]
 }
 
+INVALID_ARGS = {
+    "city" : 1234,
+    "units" : "kelvin",
+    "extra_field" : True,
+}
 
 def parse_openai(resp: dict) -> list[Call]:
     msg = resp["choices"][0]["message"]
@@ -230,6 +309,7 @@ def diff_line(a: str, b: str, c: str) -> None:
     print(f"  Gemini    : {c}")
 
 
+
 def main() -> None:
     print("=" * 72)
     print("PHASE 13 LESSON 02 - FUNCTION CALLING DEEP DIVE")
@@ -246,7 +326,7 @@ def main() -> None:
     print(json.dumps(to_gemini(WEATHER), indent=2))
 
     print("\n--- tool_choice translation ---")
-    for mode in ("auto", "none", "required", "force"):
+    for mode in ("auto", "none", "required", "any" , "force"):
         tc = ToolChoice(mode=mode, tool_name="get_weather" if mode == "force" else None)
         print(f"\nmode = {mode!r}")
         diff_line(
@@ -273,6 +353,14 @@ def main() -> None:
     print(f"  Anthropic raw args   : object -> {type(an.args).__name__}")
     print(f"  Gemini raw args      : object -> {type(gm.args).__name__}")
 
+    print("\n---List Tools Parse -------")
+    print(f"Anthropic list tools parse : {parse_list_tools_anthropic(ANTHROPIC_LIST_RESPONSE)}")
+    try:
+        print(f"OpenAI list tools parse  : {parse_list_tools_openai({})}")
+    except NotImplementedError as e:
+        print(f"OpenAI list tools parse  : {e}")
+    print(f"Gemini list tools parse : {parse_list_tools_gemini(GEMINI_LIST_RESPONSE)}")
+
     print("\n--- equivalence check ---")
     all_names = {oa.name, an.name, gm.name}
     all_args = {json.dumps(oa.args, sort_keys=True),
@@ -281,6 +369,10 @@ def main() -> None:
     print(f"  same tool name across providers : {len(all_names) == 1}")
     print(f"  same args payload across providers : {len(all_args) == 1}")
 
-
+    print(f"----Validate the invalid args and log the errors----")
+    print(json.dumps(validate(WEATHER.input_schema , INVALID_ARGS)))
+    print(f"  OpenAI schema errors    : {validate(to_openai(WEATHER)['function']['parameters'], INVALID_ARGS)}")
+    print(f"  Anthropic schema errors : {validate(to_anthropic(WEATHER)['input_schema'], INVALID_ARGS)}")
+    print(f"  Gemini schema errors    : {validate(to_gemini(WEATHER)['functionDeclarations'][0]['parameters'], INVALID_ARGS)}")
 if __name__ == "__main__":
     main()
