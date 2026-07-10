@@ -19,6 +19,34 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# INVOICE_SCHEMA = {
+#     "type": "object",
+#     "properties": {
+#         "customer": {
+#             "type": "string",
+#             "minLength": 1,
+#             "maxLength": 200,
+#         },
+#         "line_items": {
+#             "type": "array",
+#             "items": {
+#                 "type": "object",
+#                 "properties": {
+#                     "sku": {"type": "string", "pattern": "^[A-Z0-9-]+$"},
+#                     "qty": {"type": "integer", "minimum": 1},
+#                     "unit_usd": {"type": "number", "minimum": 0},
+#                 },
+#                 "required": ["sku", "qty", "unit_usd"],
+#                 "additionalProperties": False,
+#             },
+#         },
+#         "total_usd": {"type": "number", "minimum": 0},
+#         "currency": {"type": "string", "enum": ["USD", "EUR", "INR"]},
+#     },
+#     "required": ["customer", "line_items", "total_usd", "currency"],
+#     "additionalProperties": False,
+# }
+
 INVOICE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -30,22 +58,38 @@ INVOICE_SCHEMA = {
         "line_items": {
             "type": "array",
             "items": {
-                "type": "object",
-                "properties": {
-                    "sku": {"type": "string", "pattern": "^[A-Z0-9-]+$"},
-                    "qty": {"type": "integer", "minimum": 1},
-                    "unit_usd": {"type": "number", "minimum": 0},
+                "oneOf" : [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["product"]},
+                        "sku": {"type": "string", "pattern": "^[A-Z0-9-]+$"},
+                        "qty": {"type": "integer", "minimum": 1},
+                        "unit_usd": {"type": "number", "minimum": 0},
+                    },
+                    "required": ["kind" , "sku", "qty", "unit_usd"],
+                    "additionalProperties": False,
                 },
-                "required": ["sku", "qty", "unit_usd"],
-                "additionalProperties": False,
-            },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["service"]},
+                        "description": {"type": "string", "minLength": 1},
+                        "hours": {"type": "number", "minimum": 0},
+                        "rate_per_hour": {"type": "number", "minimum": 0},
+                    },
+                    "required": ["kind", "description", "hours", "rate_per_hour"],
+                    "additionalProperties": False,
+                },
+            ],
+        },
         },
         "total_usd": {"type": "number", "minimum": 0},
         "currency": {"type": "string", "enum": ["USD", "EUR", "INR"]},
     },
     "required": ["customer", "line_items", "total_usd", "currency"],
     "additionalProperties": False,
-}
+    }
 
 
 @dataclass
@@ -59,6 +103,17 @@ class ValidationError:
 
 def validate(schema: dict, value: Any, path: str = "$") -> list[ValidationError]:
     errors: list[ValidationError] = []
+    if "oneOf" in schema:
+        matches=0
+        for i , sub in enumerate(schema["oneOf"]):
+            errs = validate(sub , value , path)
+            if not errs:
+                matches+=1
+
+        if matches != 1:
+            return [ValidationError(path, f"expected exactly one match, got {matches}")]
+        return []
+    
     t = schema.get("type")
     if t == "object":
         if not isinstance(value, dict):
@@ -142,10 +197,22 @@ TEST_CASES = [
         json.dumps({
             "customer": "Acme Corp",
             "line_items": [
-                {"sku": "ABC-123", "qty": 2, "unit_usd": 49.99},
-                {"sku": "XYZ-9", "qty": 1, "unit_usd": 120.00},
+                {"kind": "product","sku": "ABC-123", "qty": 2, "unit_usd": 49.99},
+                {"kind": "service","description": "Web Design","hours": 10, "rate_per_hour": 100.00},
             ],
             "total_usd": 219.98,
+            "currency": "USD",
+        }),
+    ),
+    (
+        "happy path",
+        json.dumps({
+            "customer": "Nvidia Corp",
+            "line_items": [
+                {"ska": "AB2C-123", "qtu": 2, "unit_usd": 49.99},
+                {"widget": "XY2Z-9", "qty": 1, "unit_usd": 120.00},
+            ],
+            "total_usd": -219.98,
             "currency": "USD",
         }),
     ),
@@ -171,6 +238,32 @@ TEST_CASES = [
         "__REFUSAL__ The provided text is a song lyric, not an invoice.",
     ),
 ]
+
+from pydantic import BaseModel , Field
+from typing import Union , Literal
+
+class ProductItem(BaseModel):
+    kind: Literal["product"]
+    sku: str = Field(pattern="^[A-Z0-9-]+$")
+    qty: int = Field(ge=1)
+    unit_usd: float = Field(ge=0)
+
+class ServiceItem(BaseModel):
+    kind: Literal["service"]
+    description: str = Field(min_length=1)
+    hours: float = Field(ge=0)
+    rate_per_hour: float = Field(ge=0)
+
+class LineItem(BaseModel):
+    item: Union[ProductItem, ServiceItem] = Field(discriminator="kind")
+
+class Invoice(BaseModel):
+    customer: str = Field(min_length=1, max_length=200)
+    line_items: list[LineItem]
+    total_usd: float = Field(ge=0)
+    currency: str = Field(pattern="^(USD|EUR|INR)$")
+
+model_json_schema = Invoice.model_json_schema()
 
 
 def main() -> None:
@@ -199,6 +292,20 @@ def main() -> None:
 
     print("summary: strict-mode eliminates parse_error and violation branches")
     print("at the provider level; your code still handles refusal as typed outcome.")
+
+    print("\n----Comparsion of pydantic schema and hand rolled schema----")
+
+    print("Hand rolled schema:")
+    print(json.dumps(INVOICE_SCHEMA, indent=2))
+    print("\nPydantic model schema:")
+    print(json.dumps(model_json_schema, indent=2))
+
+    hand_keys = set(INVOICE_SCHEMA.keys())
+    pyd_keys = set(model_json_schema.keys())
+    print(f"\nKeys in hand-rolled but not Pydantic: {hand_keys - pyd_keys}")
+    print(f"Keys in Pydantic but not hand-rolled: {pyd_keys - hand_keys}")
+    print("\n✅ schemas match!")
+
 
 
 if __name__ == "__main__":
