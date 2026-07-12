@@ -60,9 +60,18 @@ def notification(method: str, params: dict | None = None) -> Message:
 def pretty(tag: str, msg: Message) -> None:
     arrow = {"request": ">>>", "response": "<<<",
              "notification": "-->", "unknown": "???"}[msg.kind]
-    print(f"{tag} {arrow} [{msg.kind}]")
-    print(json.dumps(msg.raw, indent=2))
-    print()
+    if msg.kind == "notification" and msg.raw["method"] == "notifications/progress":
+        progress , total = msg.raw.get("params", {}).get("progress") , msg.raw.get("params", {}).get("total")
+        bar_width = 20
+        done = int(progress/total * bar_width) if total != 0 else 0
+        bar = "=" * done + "-" * (bar_width - done)
+        print(f"{tag} {arrow} [{msg.kind}]")
+        print(f"[{bar}] {progress}/{total}")
+        print()
+    else:
+        print(f"{tag} {arrow} [{msg.kind}]")
+        print(json.dumps(msg.raw, indent=2))
+        print()
 
 
 CLIENT_INFO = {"name": "learner-client", "version": "1.0.0"}
@@ -127,6 +136,9 @@ def run_sequence() -> None:
         "name": "notes_search",
         "arguments": {"query": "JSON-RPC", "limit": 5},
     }))
+
+    pretty("server" , notification("notifications/progress" , {"progressToken" : 0 , "progress" : 50 , "total" : 100}))
+
     pretty("server", response(3, {
         "content": [
             {"type": "text", "text": "Found 2 notes matching 'JSON-RPC':"},
