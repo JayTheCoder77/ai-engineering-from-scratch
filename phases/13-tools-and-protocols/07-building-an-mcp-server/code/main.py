@@ -5,7 +5,7 @@ Implements the 2025-11-25 spec's core flow:
   prompts/list, prompts/get, plus notifications/initialized.
 
 Not a production server - no auth, no Streamable HTTP (Phase 13 Lesson 09),
-no subscriptions. But the wire behavior is spec-shaped; any MCP client can
+with subscriptions. But the wire behavior is spec-shaped; any MCP client can
 handshake and call the three notes tools.
 
 Run the built-in demo harness:  python main.py --demo
@@ -17,9 +17,14 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from dataclasses import dataclass, field
+# from dataclasses import dataclass, field 
 from typing import Any, Callable
+import threading
+import time
 
+SUBSCRIPTIONS : set[str] = set()
+stdout_lock = threading.Lock()
+KEEPALIVE_INTERVAL = 30
 
 PROTOCOL_VERSION = "2025-11-25"
 SERVER_INFO = {"name": "notes-lesson-07", "version": "1.0.0"}
@@ -71,6 +76,18 @@ TOOLS = [
         },
         "annotations": {"destructiveHint": False, "idempotentHint": False},
     },
+    {
+        "name": "notes_delete",
+        "description": "Use when the user deletes a note. Do not use to delete existing notes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "nid" : {"type" : "string"}
+            },
+            "required": ["nid"],
+        },
+        "annotations": {"destructiveHint": True, "idempotentHint": False},
+    },
 ]
 
 PROMPTS = [
@@ -82,7 +99,6 @@ PROMPTS = [
         ],
     }
 ]
-
 
 # ----- tool executors -----
 
@@ -109,9 +125,23 @@ def exec_notes_search(args: dict) -> list[dict]:
 def exec_notes_create(args: dict) -> list[dict]:
     nid = f"note-{uuid.uuid4().hex[:6]}"
     NOTES[nid] = {"title": args["title"], "body": args["body"], "tag": args.get("tag", "")}
+    notify_resource_updated(f"notes://{nid}")
     return [
         {"type": "text", "text": f"Created {nid}"},
         {"type": "resource", "resource": {"uri": f"notes://{nid}", "text": args["body"]}},
+    ]
+
+def exec_notes_delete(args: dict) -> list[dict]:
+    nid = args["nid"]
+    if nid not in NOTES:
+        raise ValueError(f"not found: {nid}")
+    snapshot = NOTES[nid]
+    del NOTES[nid] 
+    notify_resource_updated(f"notes://{nid}")
+    return [
+        {"type": "text", "text": f"Deleted {nid}: {snapshot['title']}"},
+        {"type": "resource", "resource": {"uri": f"notes://{nid}",
+                                        "text": f"# {snapshot['title']}\n\n{snapshot['body']}\n\ntag: {snapshot.get('tag', '')}"}},
     ]
 
 
@@ -119,6 +149,7 @@ TOOL_EXECUTORS: dict[str, Callable[[dict], list[dict]]] = {
     "notes_list": exec_notes_list,
     "notes_search": exec_notes_search,
     "notes_create": exec_notes_create,
+    "notes_delete": exec_notes_delete,
 }
 
 
@@ -129,7 +160,7 @@ def handle_initialize(params: dict) -> dict:
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
             "tools": {"listChanged": False},
-            "resources": {"listChanged": False, "subscribe": False},
+            "resources": {"listChanged": False, "subscribe": True},
             "prompts": {"listChanged": False},
         },
         "serverInfo": SERVER_INFO,
@@ -191,6 +222,29 @@ def handle_prompts_get(params: dict) -> dict:
         ],
     }
 
+def handle_resources_subscribe(params): 
+    SUBSCRIPTIONS.add(params["uri"]); return {}
+def handle_resources_unsubscribe(params): 
+    SUBSCRIPTIONS.discard(params["uri"]); return {}
+
+def notify_resource_updated(uri):
+    if uri not in SUBSCRIPTIONS:
+        return 
+    msg = {"jsonrpc" : "2.0" , "method" : "notifications/resources/updated" , "params": {"uri": uri}}
+    with stdout_lock:
+        sys.stdout.write(json.dumps(msg) + "\n")
+        sys.stdout.flush()
+
+def keepalive_loop():
+    while True:
+        time.sleep(KEEPALIVE_INTERVAL)
+        with stdout_lock:
+            try:
+                sys.stdout.write(json.dumps({"jsonrpc":"2.0","method":"notifications/message",
+                                            "params":{"level":"info","data":"keepalive"}}) + "\n")
+                sys.stdout.flush()
+            except  (ValueError, OSError):
+                break  # pipe closed
 
 HANDLERS: dict[str, Callable[[dict], dict]] = {
     "initialize": handle_initialize,
@@ -198,6 +252,8 @@ HANDLERS: dict[str, Callable[[dict], dict]] = {
     "tools/call": handle_tools_call,
     "resources/list": handle_resources_list,
     "resources/read": handle_resources_read,
+    "resources/subscribe": handle_resources_subscribe,
+    "resources/unsubscribe": handle_resources_unsubscribe,
     "prompts/list": handle_prompts_list,
     "prompts/get": handle_prompts_get,
 }
@@ -221,6 +277,7 @@ def dispatch(msg: dict) -> dict | None:
 
 
 def serve_stdio() -> None:
+    threading.Thread(target=keepalive_loop, daemon=True).start()
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -228,18 +285,20 @@ def serve_stdio() -> None:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError as e:
-            sys.stderr.write(f"parse error: {e}\n")
-            sys.stdout.write(json.dumps({
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "Parse error", "data": str(e)},
-            }) + "\n")
-            sys.stdout.flush()
+            with stdout_lock:
+                sys.stderr.write(f"parse error: {e}\n")
+                sys.stdout.write(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error", "data": str(e)},
+                }) + "\n")
+                sys.stdout.flush()
             continue
         resp = dispatch(msg)
         if resp is not None:
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
+            with stdout_lock:
+                sys.stdout.write(json.dumps(resp) + "\n")
+                sys.stdout.flush()
 
 
 def demo() -> None:
@@ -257,10 +316,13 @@ def demo() -> None:
         {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
          "params": {"name": "notes_create",
                     "arguments": {"title": "Session notes", "body": "Built it.", "tag": "mcp"}}},
-        {"jsonrpc": "2.0", "id": 7, "method": "prompts/get",
-         "params": {"name": "review_note", "arguments": {"note_id": "note-1"}}},
-        {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-         "params": {"name": "no_such_tool", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+         "params": {"name": "notes_delete",
+                    "arguments": {"nid" : "note-3"}}},
+        {"jsonrpc": "2.0", "id": 8, "method": "prompts/get",
+        "params": {"name": "review_note", "arguments": {"note_id": "note-1"}}},
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": {"name": "no_such_tool", "arguments": {}}},
     ]
     for msg in scenarios:
         print("\n>>>", msg["method"])
