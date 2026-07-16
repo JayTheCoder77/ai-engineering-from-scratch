@@ -151,7 +151,7 @@ def main() -> None:
     client.add_server("files", server_files)
     client.add_server("github", server_github)
 
-    print("\n1) initialize each server")
+    print("\n1) initialize each server")    
     client.initialize_all()
 
     print("\n2) discover tools on each")
