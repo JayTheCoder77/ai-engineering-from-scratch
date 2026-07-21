@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Callable
-
+import uuid
 
 NOTES: dict[str, dict] = {
     "note-1": {"title": "MCP primitives", "body": "tools, resources, prompts"},
@@ -34,6 +34,14 @@ NOTIFICATIONS: list[dict] = []
 def emit_notification(method: str, params: dict) -> None:
     NOTIFICATIONS.append({"jsonrpc": "2.0", "method": method, "params": params})
 
+def create_note(title:str , body:str):
+    if title in [n["title"] for n in NOTES.values()]:
+        raise ValueError("Note with same title already exists")
+    nid = str(uuid.uuid4())
+    NOTES[nid] = {"title" : title , "body" : body}
+    emit_notification("notifications/resources/list_changed",
+                              {"uri":f"notes://{nid}"})
+    return nid
 
 def update_note(nid: str, new_body: str) -> None:
     if nid in NOTES:
@@ -84,7 +92,6 @@ def handle_resources_unsubscribe(params: dict) -> dict:
     SUBSCRIPTIONS.discard(params["uri"])
     return {}
 
-
 PROMPTS = [
     {
         "name": "review_note",
@@ -99,6 +106,28 @@ PROMPTS = [
         "description": "Write a one-paragraph summary of all notes with a given tag.",
         "arguments": [
             {"name": "tag", "description": "Tag to aggregate", "required": True},
+        ],
+    },
+    {
+        "name" : "summarize_pr",
+        "description" : "Given a PR number, write a one-paragraph summary of the changes.",
+        "arguments" : [
+            {"name" : "pr_number" , "description" : "PR number to summarize" , "required" : True},
+        ],
+    },
+    {
+        "name" : "triage_issue",
+        "description" : "Classify a new GitHub issue and suggest labels and assignee.",
+        "arguments" : [
+            {"name" : "issue_id" , "description" : "Issue identifier" , "required" : True},
+        ],
+    },
+    {
+        "name" : "release_notes",
+        "description" : "Generate release notes from a range of commits or tags.",
+        "arguments" : [
+            {"name" : "start_tag" , "description" : "Start of the range" , "required" : True},
+            {"name" : "end_tag" , "description" : "End of the range" , "required" : True},
         ],
     },
 ]
@@ -131,6 +160,41 @@ def handle_prompts_get(params: dict) -> dict:
                     "text": f"Summarize the notes tagged {tag!r} in one paragraph."}},
             ],
         }
+
+    if name == "summarize_pr":
+        pr_number = args.get("pr_number" , "")
+        return{
+            "description" : f"Summarize the pr : {pr_number}",
+            "messages" : [
+                {"role": "user", "content": {"type": "text",
+                    "text": f"Summarize the changes in PR #{pr_number} in one paragraph."
+                }},
+            ],
+        }
+    
+    if name == "triage_issue":
+        issue_id = args.get("issue_id" , "")
+        return{
+            "description" : f"Triage the issue : {issue_id}",
+            "messages" : [
+                {"role": "user", "content": {"type": "text",
+                    "text": f"Triage the issue #{issue_id} and suggest labels and assignee."
+                }},
+            ],
+        }
+
+    if name == "release_notes":
+        start_tag = args.get("start_tag" , "")
+        end_tag = args.get("end_tag" , "")
+        return{
+            "description" : f"Generate release notes from {start_tag} to {end_tag}",
+            "messages" : [
+                {"role": "user", "content": {"type": "text",
+                    "text": f"Generate release notes from {start_tag} to {end_tag}."
+                }},
+            ],
+        }
+    
     raise ValueError(f"unknown prompt: {name}")
 
 
@@ -176,6 +240,13 @@ def demo() -> None:
     print(f"  notifications emitted: {len(NOTIFICATIONS)}")
     print(f"  last = {NOTIFICATIONS[-1]}")
 
+    print("\n5) creating a new note")
+    nid = create_note("new note","this is a new note")
+    dispatch("resources/subscribe", {"uri": f"notes://{nid}"})
+    print(f"  subscriptions: {list(SUBSCRIPTIONS)}")
+    print(f"  notifications emitted: {len(NOTIFICATIONS)}")
+    print(f"  last = {NOTIFICATIONS[-1]}")
+
     print("\n5) prompts/list")
     r = dispatch("prompts/list", {})
     for p in r["prompts"]:
@@ -184,6 +255,18 @@ def demo() -> None:
     print("\n6) prompts/get review_note note_id=note-1 style=concise")
     r = dispatch("prompts/get", {"name": "review_note",
                                  "arguments": {"note_id": "note-1", "style": "concise"}})
+    print(f"  description: {r['description']}")
+    print(f"  user msg: {r['messages'][0]['content']['text'][:80]}...")
+
+    r = dispatch("prompts/get" , {"name" : "summarize_pr" , "arguments" : {"pr_number" : "123"}})
+    print(f"  description: {r['description']}")
+    print(f"  user msg: {r['messages'][0]['content']['text'][:80]}...")
+
+    r = dispatch("prompts/get" , {"name" : "triage_issue" , "arguments" : {"issue_id" : "123"}})
+    print(f"  description: {r['description']}")
+    print(f"  user msg: {r['messages'][0]['content']['text'][:80]}...")
+
+    r = dispatch("prompts/get" , {"name" : "release_notes" , "arguments" : {"start_tag" : "1.0" , "end_tag" : "2.0"}})
     print(f"  description: {r['description']}")
     print(f"  user msg: {r['messages'][0]['content']['text'][:80]}...")
 
