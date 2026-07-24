@@ -22,10 +22,29 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-
+import sqlite3
 
 STORE_DIR = Path("/tmp/lesson-13-tasks")
 STORE_DIR.mkdir(parents=True, exist_ok=True)
+
+# db
+con = sqlite3.connect("/home/jayant/projects/ai-engineering-from-scratch/phases/13-tools-and-protocols/13-mcp-async-tasks/code/tutorial.db" , check_same_thread=False)
+cur = con.cursor()
+
+cur.execute(""" 
+    CREATE TABLE IF NOT EXISTS tasks(
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        progress FLOAT NOT NULL,
+        total_ms INTEGER NOT NULL,
+        result TEXT,
+        error TEXT,
+        ttl_ms INTEGER NOT NULL,
+        created_at FLOAT NOT NULL,
+        cancel_requested BOOLEAN NOT NULL
+    )
+""")
+con.commit()
 
 
 @dataclass
@@ -41,15 +60,53 @@ class Task:
     cancel_requested: bool = False
 
     def persist(self) -> None:
-        (STORE_DIR / f"{self.id}.json").write_text(json.dumps(asdict(self), indent=2))
+        # (STORE_DIR / f"{self.id}.json").write_text(json.dumps(asdict(self), indent=2))
+        cur.execute("""
+            INSERT INTO tasks (id, state, progress, total_ms, result, error, ttl_ms, created_at, cancel_requested) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                state = excluded.state,
+                progress = excluded.progress,
+                total_ms = excluded.total_ms,
+                result = excluded.result,
+                error = excluded.error,
+                ttl_ms = excluded.ttl_ms,
+                created_at = excluded.created_at,
+                cancel_requested = excluded.cancel_requested
+        """, (self.id, self.state, self.progress, self.total_ms, json.dumps(self.result), self.error, self.ttl_ms, self.created_at, self.cancel_requested))
+        con.commit()
 
     @classmethod
     def load(cls, tid: str) -> "Task | None":
-        p = STORE_DIR / f"{tid}.json"
-        if not p.exists():
+        # p = STORE_DIR / f"{tid}.json"
+        p = cur.execute("""
+            SELECT 
+                id,
+                state,
+                progress,
+                total_ms,
+                result,
+                error,
+                ttl_ms,
+                created_at,
+                cancel_requested
+            FROM tasks WHERE id = ?
+        """, (tid,)).fetchone()
+
+        if not p:
             return None
-        data = json.loads(p.read_text())
-        return cls(**data)
+        
+        return cls(
+            id=p[0],
+            state=p[1],
+            progress=p[2],
+            total_ms=p[3],
+            result=json.loads(p[4]) if p[4] else None,
+            error=p[5],
+            ttl_ms=p[6],
+            created_at=p[7],
+            cancel_requested=bool(p[8])
+        )
 
 
 class TaskStore:
@@ -58,8 +115,12 @@ class TaskStore:
         self.crash_recover()
 
     def crash_recover(self) -> None:
-        for p in STORE_DIR.glob("*.json"):
-            t = Task.load(p.stem)
+        # for p in STORE_DIR.glob("*.json"):
+        cur.execute("SELECT id FROM tasks WHERE state = ?", ("working",))
+        rows = cur.fetchall()
+        for p in rows:
+            tid = p[0]
+            t = Task.load(tid)
             if t is None:
                 continue
             if t.state == "working":
@@ -157,6 +218,8 @@ def demo() -> None:
     while True:
         status = tasks_status(tid)
         print(f"  state={status['state']:10s}  progress={status['progress']:.2f}")
+        # result = tasks_result(tid)
+        # print(f"  result: {result}")
         if status["state"] in {"completed", "failed", "cancelled"}:
             break
         time.sleep(0.5)
